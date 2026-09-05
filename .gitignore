@@ -1,0 +1,9 @@
+.DS_Store
+*.log
+*.tmp
+*.swp
+*.bak
+easytier-oneclick.toml
+*.env
+*.key
+*.pem
