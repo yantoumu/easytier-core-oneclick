@@ -39,12 +39,33 @@ sh install.sh \
   --network-name '<network-name>' \
   --peer 'tcp://<peer-host>:<port>' \
   --peer 'udp://<peer-host>:<port>' \
+  --listener '11010' \
+  --latency-first \
+  --need-p2p \
   --ip '<virtual-ip>'
 ```
 
 The secret can also be provided with `ET_NETWORK_SECRET`, but the interactive
 prompt is safer for manual use because it avoids putting the key in shell
 history.
+
+## Lower-Latency Direct Connections
+
+For nodes that can accept inbound traffic, add a listener:
+
+```sh
+sh install.sh --listener '11010'
+```
+
+The installer expands `11010` to `tcp://0.0.0.0:11010` and
+`udp://0.0.0.0:11010` in the EasyTier config. If the node is behind NAT or a
+cloud firewall, the port still needs to be reachable from other peers. For
+manually published public endpoints, use `--mapped-listener` or
+`ET_MAPPED_LISTENERS`.
+
+When a mesh has more than one route, `--latency-first` asks EasyTier to prefer
+the lowest-latency path. `--need-p2p` asks other peers to proactively try P2P
+with this node.
 
 ## Offline or Mirrored Installation
 

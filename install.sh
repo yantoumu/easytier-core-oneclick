@@ -16,6 +16,12 @@ CONFIG_BASENAME="${ET_CONFIG_BASENAME:-easytier-oneclick.toml}"
 VERSION="${ET_VERSION:-v2.6.4}"
 PEERS_RAW="${ET_PEERS:-}"
 CUSTOM_PEERS=0
+LISTENERS_RAW="${ET_LISTENERS:-}"
+CUSTOM_LISTENERS=0
+MAPPED_LISTENERS_RAW="${ET_MAPPED_LISTENERS:-}"
+CUSTOM_MAPPED_LISTENERS=0
+LATENCY_FIRST="${ET_LATENCY_FIRST:-false}"
+NEED_P2P="${ET_NEED_P2P:-false}"
 NO_SERVICE="${ET_NO_SERVICE:-0}"
 AUTO_INSTALL_DEPS="${ET_AUTO_INSTALL_DEPS:-1}"
 LOCAL_ZIP="${ET_LOCAL_ZIP:-}"
@@ -46,6 +52,12 @@ Options:
   --network-name NAME   EasyTier network name
   --peer URI            Add one peer URI, e.g. tcp://<peer-host>:<port>. Can be repeated.
   --peers LIST          Comma- or newline-separated peer URI list.
+  --listener VALUE      Add one listener, e.g. 11010 or tcp://0.0.0.0:11010. Can be repeated.
+                        Plain port numbers expand to both tcp://0.0.0.0:<port> and udp://0.0.0.0:<port>.
+  --listeners LIST      Comma- or newline-separated listener list.
+  --mapped-listener URI Add one public mapped listener URI. Can be repeated.
+  --mapped-listeners LIST
+                        Comma- or newline-separated mapped listener URI list.
   --route-cidr CIDR     Route CIDR for this mesh. Default: derived from --ip.
   --version TAG         EasyTier release tag. Default: v2.6.4. Use "latest" to query GitHub API.
   --asset-url URL       Download a specific release zip URL directly.
@@ -54,6 +66,8 @@ Options:
   --install-dir PATH    Binary install directory. Default: /usr/local/bin
   --config-dir PATH     Config directory. Default: /Library/Application Support/EasyTier on macOS, /etc/easytier on Linux.
   --service-name NAME   Service name. Default: easytier
+  --latency-first       Prefer the lowest-latency route when EasyTier has multiple paths.
+  --need-p2p            Ask peers to proactively establish P2P connections to this node.
   --no-service          Install binaries/config only; do not install a startup service.
   --no-install-deps     Do not try package-manager installation for missing curl/wget/unzip.
   --dry-run             Print detected OS/arch/asset/service plan and exit.
@@ -67,6 +81,10 @@ Environment overrides:
   ET_ROUTE_CIDR         Same as --route-cidr.
   ET_VERSION            Same as --version.
   ET_PEERS              Comma- or newline-separated peer URI list.
+  ET_LISTENERS          Comma- or newline-separated listener list.
+  ET_MAPPED_LISTENERS   Comma- or newline-separated mapped listener URI list.
+  ET_LATENCY_FIRST      true/false. Same as --latency-first.
+  ET_NEED_P2P           true/false. Same as --need-p2p.
   ET_ASSET_URL          Same as --asset-url.
   ET_DOWNLOAD_BASE      Same as --download-base.
   ET_LOCAL_ZIP          Same as --local-zip.
@@ -117,6 +135,40 @@ $2"
       CUSTOM_PEERS=1
       shift 2
       ;;
+    --listener)
+      [ "$#" -ge 2 ] || die '--listener requires a value'
+      if [ "$CUSTOM_LISTENERS" -eq 0 ]; then
+        LISTENERS_RAW="$2"
+        CUSTOM_LISTENERS=1
+      else
+        LISTENERS_RAW="${LISTENERS_RAW}
+$2"
+      fi
+      shift 2
+      ;;
+    --listeners)
+      [ "$#" -ge 2 ] || die '--listeners requires a value'
+      LISTENERS_RAW="$2"
+      CUSTOM_LISTENERS=1
+      shift 2
+      ;;
+    --mapped-listener)
+      [ "$#" -ge 2 ] || die '--mapped-listener requires a value'
+      if [ "$CUSTOM_MAPPED_LISTENERS" -eq 0 ]; then
+        MAPPED_LISTENERS_RAW="$2"
+        CUSTOM_MAPPED_LISTENERS=1
+      else
+        MAPPED_LISTENERS_RAW="${MAPPED_LISTENERS_RAW}
+$2"
+      fi
+      shift 2
+      ;;
+    --mapped-listeners)
+      [ "$#" -ge 2 ] || die '--mapped-listeners requires a value'
+      MAPPED_LISTENERS_RAW="$2"
+      CUSTOM_MAPPED_LISTENERS=1
+      shift 2
+      ;;
     --route-cidr)
       [ "$#" -ge 2 ] || die '--route-cidr requires a value'
       ROUTE_CIDR="$2"
@@ -156,6 +208,14 @@ $2"
       [ "$#" -ge 2 ] || die '--service-name requires a value'
       SERVICE_NAME="$2"
       shift 2
+      ;;
+    --latency-first)
+      LATENCY_FIRST=true
+      shift
+      ;;
+    --need-p2p)
+      NEED_P2P=true
+      shift
       ;;
     --no-service)
       NO_SERVICE=1
@@ -276,6 +336,52 @@ shell_quote() {
 
 normalize_peers() {
   printf '%s\n' "$1" | tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; /^[[:space:]]*$/d'
+}
+
+normalize_listeners() {
+  normalize_peers "$1" | while IFS= read -r listener; do
+    case "$listener" in
+      *[!0123456789]*)
+        printf '%s\n' "$listener"
+        ;;
+      *)
+        printf 'tcp://0.0.0.0:%s\n' "$listener"
+        printf 'udp://0.0.0.0:%s\n' "$listener"
+        ;;
+    esac
+  done
+}
+
+normalize_bool() {
+  name="$1"
+  value="$(printf '%s' "$2" | tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz')"
+  case "$value" in
+    true|1|yes|on) printf 'true' ;;
+    false|0|no|off|'') printf 'false' ;;
+    *) die "${name} must be true or false" ;;
+  esac
+}
+
+print_toml_array() {
+  key="$1"
+  values="$2"
+  printf '%s = [' "$key"
+  first=1
+  old_ifs="$IFS"
+  IFS='
+'
+  set -f
+  for value in $values; do
+    if [ "$first" -eq 1 ]; then
+      first=0
+    else
+      printf ', '
+    fi
+    printf '"%s"' "$(toml_escape "$value")"
+  done
+  set +f
+  IFS="$old_ifs"
+  printf ']\n'
 }
 
 download_stdout() {
@@ -684,6 +790,10 @@ esac
 
 CONFIG_FILE="${CONFIG_DIR}/${CONFIG_BASENAME}"
 HOSTNAME_VALUE="${ET_HOSTNAME:-$(choose_default_hostname)}"
+LISTENERS="$(normalize_listeners "$LISTENERS_RAW" 2>/dev/null || true)"
+MAPPED_LISTENERS="$(normalize_peers "$MAPPED_LISTENERS_RAW" 2>/dev/null || true)"
+LATENCY_FIRST="$(normalize_bool 'ET_LATENCY_FIRST/--latency-first' "$LATENCY_FIRST")"
+NEED_P2P="$(normalize_bool 'ET_NEED_P2P/--need-p2p' "$NEED_P2P")"
 if [ "$DRY_RUN" = "1" ]; then
   IPV4_VALUE="${ET_IPV4:-[interactive]}"
   PEERS="$(normalize_peers "$PEERS_RAW" 2>/dev/null || true)"
@@ -740,6 +850,10 @@ if [ "$DRY_RUN" = "1" ]; then
   printf 'Install dir: %s\n' "$INSTALL_DIR"
   printf 'Service: %s\n' "$SERVICE_NAME"
   printf 'Peers:\n%s\n' "$PEERS"
+  printf 'Listeners:\n%s\n' "${LISTENERS:-[]}"
+  printf 'Mapped listeners:\n%s\n' "${MAPPED_LISTENERS:-[]}"
+  printf 'Latency first: %s\n' "$LATENCY_FIRST"
+  printf 'Need P2P: %s\n' "$NEED_P2P"
   exit 0
 fi
 
@@ -791,7 +905,8 @@ CONFIG_TMP="${TMP_DIR}/${CONFIG_BASENAME}"
 {
   printf 'hostname = "%s"\n' "$(toml_escape "$HOSTNAME_VALUE")"
   printf 'ipv4 = "%s"\n' "$(toml_escape "$IPV4_VALUE")"
-  printf 'listeners = []\n'
+  print_toml_array 'listeners' "$LISTENERS"
+  print_toml_array 'mapped_listeners' "$MAPPED_LISTENERS"
   printf 'routes = ["%s"]\n' "$(toml_escape "$ROUTE_CIDR")"
   printf 'tcp_whitelist = []\n'
   printf 'udp_whitelist = []\n\n'
@@ -805,6 +920,8 @@ CONFIG_TMP="${TMP_DIR}/${CONFIG_BASENAME}"
   done
   printf '[flags]\n'
   printf 'enable_ipv6 = false\n'
+  printf 'latency_first = %s\n' "$LATENCY_FIRST"
+  printf 'need_p2p = %s\n' "$NEED_P2P"
 } >"$CONFIG_TMP"
 
 log "Writing EasyTier config to ${CONFIG_FILE}"
