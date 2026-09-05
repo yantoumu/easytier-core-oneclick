@@ -68,7 +68,9 @@ sh install.sh --download-base 'https://<mirror-host>/<release-path>'
 - Package-manager fallback for missing tools: `apt`, `dnf`, `yum`, `apk`,
   `pacman`, `zypper`, `opkg`, `pkg`, or Homebrew.
 - Service fallback: EasyTier's service helper first, then `systemd`, OpenWrt
-  init scripts, or macOS `launchd`.
+  init scripts, macOS `launchd`, and finally a `nohup` background runner for
+  minimal Linux/container environments without a service manager. If `crontab`
+  exists, the background runner also installs an `@reboot` entry.
 
 ## Dry Run
 

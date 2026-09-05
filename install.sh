@@ -22,6 +22,7 @@ LOCAL_ZIP="${ET_LOCAL_ZIP:-}"
 ASSET_URL="${ET_ASSET_URL:-}"
 DOWNLOAD_BASE="${ET_DOWNLOAD_BASE:-}"
 DRY_RUN=0
+SERVICE_MODE=""
 
 die() {
   printf 'ERROR: %s\n' "$*" >&2
@@ -269,6 +270,10 @@ xml_escape() {
   printf '%s' "$1" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g'
 }
 
+shell_quote() {
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
 normalize_peers() {
   printf '%s\n' "$1" | tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; /^[[:space:]]*$/d'
 }
@@ -500,6 +505,7 @@ EOF
   as_root systemctl daemon-reload
   as_root systemctl enable "$SERVICE_NAME"
   as_root systemctl restart "$SERVICE_NAME"
+  SERVICE_MODE="systemd"
 }
 
 write_openwrt_service() {
@@ -521,6 +527,7 @@ EOF
   install_file_root "$init_tmp" "$init_path" 0755
   as_root "$init_path" enable
   as_root "$init_path" restart
+  SERVICE_MODE="openwrt"
 }
 
 write_launchd_service() {
@@ -558,6 +565,72 @@ EOF
   as_root launchctl bootstrap system "$plist_path"
   as_root launchctl enable "system/${label}" >/dev/null 2>&1 || true
   as_root launchctl kickstart -k "system/${label}" >/dev/null 2>&1 || true
+  SERVICE_MODE="launchd"
+}
+
+write_background_runner() {
+  runner_path="${INSTALL_DIR}/${SERVICE_NAME}-run"
+  runner_tmp="$TMP_DIR/${SERVICE_NAME}-run"
+  pid_file="${CONFIG_DIR}/${SERVICE_NAME}.pid"
+  log_file="${CONFIG_DIR}/${SERVICE_NAME}.log"
+  start_tmp="$TMP_DIR/${SERVICE_NAME}-start-background"
+
+  cat >"$runner_tmp" <<EOF
+#!/bin/sh
+exec $(shell_quote "${INSTALL_DIR}/easytier-core") --config-file $(shell_quote "$CONFIG_FILE")
+EOF
+  install_file_root "$runner_tmp" "$runner_path" 0755
+
+  cat >"$start_tmp" <<EOF
+#!/bin/sh
+set -eu
+runner=$(shell_quote "$runner_path")
+pid_file=$(shell_quote "$pid_file")
+log_file=$(shell_quote "$log_file")
+log_dir=\$(dirname "\$log_file")
+mkdir -p "\$log_dir"
+if [ -f "\$pid_file" ]; then
+  old_pid=\$(sed -n '1p' "\$pid_file" 2>/dev/null | tr -cd '0-9' || true)
+  if [ -n "\$old_pid" ] && kill -0 "\$old_pid" 2>/dev/null; then
+    kill "\$old_pid" 2>/dev/null || true
+    sleep 1
+  fi
+fi
+if command -v nohup >/dev/null 2>&1; then
+  nohup "\$runner" >> "\$log_file" 2>&1 &
+else
+  "\$runner" >> "\$log_file" 2>&1 &
+fi
+printf '%s\n' "\$!" > "\$pid_file"
+chmod 600 "\$pid_file" "\$log_file" 2>/dev/null || true
+EOF
+  as_root sh "$start_tmp"
+
+  if has_cmd crontab; then
+    cron_tmp="$TMP_DIR/${SERVICE_NAME}-install-cron"
+    marker="# easytier-oneclick service: ${SERVICE_NAME}"
+    cron_cmd="@reboot $(shell_quote "$runner_path") >> $(shell_quote "$log_file") 2>&1"
+    cat >"$cron_tmp" <<EOF
+#!/bin/sh
+set -eu
+tmp=\$(mktemp)
+marker=$(shell_quote "$marker")
+runner=$(shell_quote "$runner_path")
+crontab -l 2>/dev/null | awk -v marker="\$marker" -v runner="\$runner" '\$0 != marker && index(\$0, runner) == 0 { print }' > "\$tmp" || true
+printf '%s\n%s\n' "\$marker" $(shell_quote "$cron_cmd") >> "\$tmp"
+crontab "\$tmp"
+rm -f "\$tmp"
+EOF
+    if as_root sh "$cron_tmp"; then
+      log "Installed crontab @reboot fallback for ${SERVICE_NAME}"
+    else
+      log "Could not install crontab @reboot fallback; EasyTier is running now but may need manual restart after reboot"
+    fi
+  else
+    log "crontab not found; EasyTier is running now but may need manual restart after reboot"
+  fi
+
+  SERVICE_MODE="background"
 }
 
 manual_service_install() {
@@ -569,7 +642,8 @@ manual_service_install() {
   elif [ "$OS_NAME" = "macos" ] && has_cmd launchctl; then
     write_launchd_service
   else
-    die 'could not install a startup service on this OS/init system. Re-run with --no-service to install binaries only.'
+    log 'No supported service manager found; starting EasyTier with nohup background fallback'
+    write_background_runner
   fi
 }
 
@@ -584,6 +658,7 @@ install_service() {
     -- \
     --config-file "$CONFIG_FILE"; then
     if as_root "${INSTALL_DIR}/easytier-cli" service --name "$SERVICE_NAME" start; then
+      SERVICE_MODE="easytier-service"
       return
     fi
   fi
@@ -743,8 +818,23 @@ else
   install_service
   sleep 2
 
-  log 'Service status'
-  "${INSTALL_DIR}/easytier-cli" service --name "$SERVICE_NAME" status || true
+  if [ "$SERVICE_MODE" = "background" ]; then
+    log 'Background runner status'
+    pid_file="${CONFIG_DIR}/${SERVICE_NAME}.pid"
+    if [ -f "$pid_file" ]; then
+      pid="$(sed -n '1p' "$pid_file" 2>/dev/null | tr -cd '0-9' || true)"
+      if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        printf 'EasyTier is running in background with PID %s\n' "$pid" >&2
+      else
+        printf 'EasyTier background PID file exists, but the process is not running\n' >&2
+      fi
+    else
+      printf 'EasyTier background PID file was not found\n' >&2
+    fi
+  else
+    log 'Service status'
+    "${INSTALL_DIR}/easytier-cli" service --name "$SERVICE_NAME" status || true
+  fi
 
   log 'Node info'
   "${INSTALL_DIR}/easytier-cli" node info || true
